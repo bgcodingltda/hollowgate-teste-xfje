@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1.0, user-scalable=no, shrink-to-fit=yes, viewport-fit=cover">
+  <title>Hollowgate</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon-192.png">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <meta name="theme-color" content="#0b0709">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="Hollowgate">
+  <style>
+    html, body { margin: 0; height: 100%; background: #0b0709; overflow: hidden; touch-action: none; overscroll-behavior: none;
+                 -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
+    /* portrait game: full screen on phones; on a wide desktop window it stays a centered phone-shaped column.
+       The canvas box is set in px by fitCanvas() below from innerWidth/innerHeight: viewport units (vw/dvh) are
+       wrong when the page is inside a CSS-zoomed iframe (WebKit sizes 100vw by the zoom: the game ran past the right edge).
+       The canvas stays inside the iPhone safe area (notch / home bar): Unity's Screen.safeArea is the whole canvas on the web. */
+    #unity-canvas { position: fixed; left: 0; top: 0; width: 100%; height: 100%; display: block; background: #0b0709; }
+    #safe-probe { position: fixed; visibility: hidden; pointer-events: none; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+    #loading { position: fixed; left: 0; top: 0; width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center;
+               gap: 18px; color: #e9dcc4; font: 600 16px Georgia, serif; }
+    #loading img { width: 120px; height: 120px; border-radius: 28px; box-shadow: 0 0 40px #8a1c2a55; }
+    #bar { width: 200px; height: 8px; border-radius: 4px; background: #2a1a1c; overflow: hidden; }
+    #fill { width: 0; height: 100%; background: linear-gradient(90deg, #8a1c2a, #d9a441); transition: width .2s; }
+    /* portrait game: ask to turn the phone back upright when it is held sideways */
+    #rotate { display: none; position: fixed; left: 0; top: 0; width: 100%; height: 100%; z-index: 10; background: #0b0709; color: #e9dcc4;
+              font: 700 20px Georgia, serif; flex-direction: column; align-items: center; justify-content: center; gap: 16px; text-align: center; }
+    #rotate .phone { width: 80px; height: 46px; border: 4px solid #d9a441; border-radius: 10px; animation: turn 1.6s ease-in-out infinite; }
+    @keyframes turn { 0%, 30% { transform: rotate(0deg); } 60%, 100% { transform: rotate(90deg); } }
+    /* faixa da barra de status (hora, Wi-Fi, 4G, bateria / Dynamic Island): nada do jogo fica embaixo dela */
+    #statusband { position: fixed; left: 0; top: 0; width: 100%; height: 0; background: #000; z-index: 4; pointer-events: none; }
+    #ver { position: fixed; left: 0; width: 100%; box-sizing: border-box; padding-right: 6px; text-align: right; bottom: max(1px, calc(env(safe-area-inset-bottom) - 13px)); color: #ffffff38; font: 9px system-ui; pointer-events: none; z-index: 5; }
+  </style>
+</head>
+<body>
+  <canvas id="unity-canvas" tabindex="-1"></canvas>
+  <div id="loading"><img src="icon-192.png" alt=""><div id="bar"><div id="fill"></div></div><div id="msg">Carregando…</div></div>
+  <div id="ver"></div>
+  <div id="safe-probe"></div>
+  <div id="statusband"></div>
+  <div id="rotate"><div class="phone"></div>Vire o celular em pé para jogar</div>
+  <script>
+    // ---- canvas box in px from innerWidth/innerHeight (see the CSS note): never wider than the visible page
+    (function () {
+      const cv = document.getElementById("unity-canvas"), probe = document.getElementById("safe-probe");
+      let lastW = 0, lastH = 0;
+      function fitCanvas() {
+        const W = window.innerWidth, Hn = window.innerHeight;
+        if (!W || !Hn) return;
+        // the on-screen keyboard shrinks innerHeight: keep the height while typing (no relayout jump under the finger)
+        const typing = /^(INPUT|TEXTAREA)$/.test((document.activeElement || {}).tagName || "");
+        const H = typing && W === lastW && Hn < lastH ? lastH : Hn;
+        lastW = W; lastH = H;
+        const ps = getComputedStyle(probe), sb = parseFloat(ps.paddingBottom) || 0,
+              sl = parseFloat(ps.paddingLeft) || 0, sr = parseFloat(ps.paddingRight) || 0;
+        let st = parseFloat(ps.paddingTop) || 0;
+        // Celular emulado (iframe da Central, que desenha a Dynamic Island por cima e não tem área segura): sem inset no topo,
+        // tela alta (h/w >= 2) → reserva a faixa da barra de status (47 px). ?ilha=1 força; ?ilha=0 desliga.
+        const ilha = (location.search.match(/[?&]ilha=([01])/) || [])[1];
+        let inFrame = false; try { inFrame = window.self !== window.top; } catch (e) { inFrame = true; }
+        if (ilha === "1" || (ilha !== "0" && st < 1 && inFrame && Hn / W >= 2.0)) st = Math.max(st, 47);
+        const band = document.getElementById("statusband"); band.style.height = st + "px";
+        const h = Math.max(1, H - st - sb), free = Math.max(1, W - sl - sr);
+        const w = W > 900 ? Math.min(free, Math.round(h * 1170 / 2532)) : free;   // wide desktop window: phone-shaped column
+        Object.assign(cv.style, { left: (sl + (free - w) / 2) + "px", top: st + "px", width: w + "px", height: h + "px" });
+        for (const id of ["loading", "rotate", "ver"]) { const e = document.getElementById(id); e.style.width = W + "px"; if (id !== "ver") e.style.height = H + "px"; }
+        Object.assign(document.getElementById("ver").style, { bottom: "auto", top: (H - 12 - Math.max(1, sb - 13)) + "px" });   // same spot as before, in px
+        document.getElementById("rotate").style.display = W > H && H < 500 ? "flex" : "none";   // portrait game: ask to turn the phone upright
+      }
+      window.hgFitCanvas = fitCanvas;
+      fitCanvas();
+      window.addEventListener("resize", fitCanvas);
+      window.addEventListener("orientationchange", () => setTimeout(fitCanvas, 300));
+      if (window.visualViewport) visualViewport.addEventListener("resize", fitCanvas);
+      if (window.ResizeObserver) new ResizeObserver(fitCanvas).observe(document.documentElement);
+    })();
+  </script>
+  <script>
+    // Build id is stamped by ProjectSetup.BuildWebGL; version.json on the server holds the latest one.
+    const BUILD_ID = "20261128-0245";
+    document.getElementById("ver").textContent = "v " + BUILD_ID;
+
+    // ---- iOS audio unlock: Safari keeps every AudioContext suspended until a user gesture.
+    // Track the contexts Unity creates and resume them on the first touches/clicks.
+    (function () {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      const all = [];
+      // ?mudo=1 (automated tests): every AudioContext stays suspended, nothing ever plays
+      const mute = /[?&]mudo=1/.test(location.search);
+      function Wrapped(opts) { const c = new Ctx(opts); all.push(c); if (mute) { c.suspend().catch(() => {}); c.resume = () => Promise.resolve(); } return c; }
+      Wrapped.prototype = Ctx.prototype;
+      window.AudioContext = Wrapped; if (window.webkitAudioContext) window.webkitAudioContext = Wrapped;
+      function unlock() {
+        for (const c of all) if (c.state !== "running") c.resume().catch(() => {});
+        if (all.length && all.every((c) => c.state === "running")) {
+          for (const ev of ["touchend", "pointerup", "click", "keydown"]) document.removeEventListener(ev, unlock, true);
+        }
+      }
+      if (mute) return;
+      for (const ev of ["touchend", "pointerup", "click", "keydown"]) document.addEventListener(ev, unlock, true);
+      // coming back from the background can leave the context "interrupted" on iOS
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible") for (const c of all) if (c.state !== "running") c.resume().catch(() => {});
+      });
+    })();
+
+    // ---- auto-update: whenever the app is opened or comes back to the foreground, ask the server
+    // which build is current; if it is newer than this page, reload (the service worker is
+    // network-first, so the reload gets the new files). No reinstall needed.
+    async function checkForUpdate() {
+      try {
+        const r = await fetch("version.json?t=" + Date.now(), { cache: "no-store" });
+        if (!r.ok) return;
+        const v = await r.json();
+        if (v.build && v.build !== BUILD_ID) {
+          // the CDN may still hand out the old page for a few minutes: try each new build at
+          // most once per 20 s so this can never become a reload loop
+          const key = "hg-reload-" + v.build, last = +(sessionStorage.getItem(key) || 0);
+          if (Date.now() - last < 20000) return;
+          sessionStorage.setItem(key, Date.now());
+          document.getElementById("msg").textContent = "Atualizando…";
+          location.replace("./?v=" + encodeURIComponent(v.build) + (/[?&]mudo=1/.test(location.search) ? "&mudo=1" : "") + (/[?&]check=1/.test(location.search) ? "&check=1" : ""));   // query busts the CDN copy of the page
+        }
+      } catch (e) { /* offline: keep playing the cached build */ }
+    }
+    document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") checkForUpdate(); });
+    window.addEventListener("focus", checkForUpdate);
+    setInterval(checkForUpdate, 60000);
+    checkForUpdate();
+
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("sw.js?b=" + BUILD_ID).catch(() => {});
+    }
+
+    // ---- Unity loader
+    const canvas = document.getElementById("unity-canvas");
+    const buildUrl = "Build";
+    const config = {
+      arguments: [],
+      dataUrl: buildUrl + "/ab7edc98fdcc1d18cb53ac4068b3c56b.data",
+      frameworkUrl: buildUrl + "/8e13e7388622fcb77d99646f4eb013ea.framework.js",
+      codeUrl: buildUrl + "/1308162530b37455e41078a698fc5840.wasm",
+      streamingAssetsUrl: "StreamingAssets",
+      companyName: "BG Coding",
+      productName: "Hollowgate",
+      productVersion: "1.0",
+      autoSyncPersistentDataPath: true,
+      devicePixelRatio: Math.min(window.devicePixelRatio || 1, 2),   // iPhone is 3x: 2x is sharp enough and far lighter
+    };
+    const script = document.createElement("script");
+    script.src = buildUrl + "/94266c46bdc8aa36d0396ff620500091.loader.js";
+    script.onload = () => {
+      createUnityInstance(canvas, config, (p) => {
+        document.getElementById("fill").style.width = (p * 100) + "%";
+      }).then((inst) => {
+        window.unityInstance = inst;
+        document.getElementById("loading").style.display = "none";
+      }).catch((message) => {
+        document.getElementById("msg").textContent = "Erro: " + message;
+      });
+    };
+    document.body.appendChild(script);
+  </script>
+</body>
+</html>
